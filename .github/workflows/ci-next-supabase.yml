@@ -78,7 +78,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           nuevas=$(git diff --name-only --diff-filter=A origin/${{ github.base_ref }}...HEAD -- supabase/migrations/ | grep -E '\.sql$' || true)
-          if [ -n "$nuevas" ]; then pnpm squawk $nuevas; else echo "sin migraciones nuevas"; fi
+          if [ -n "$nuevas" ]; then echo "$nuevas" | xargs pnpm squawk; else echo "sin migraciones nuevas"; fi
       - name: Migraciones editadas (prohibido)
         if: github.event_name == 'pull_request'
         run: |
@@ -144,5 +144,8 @@ jobs:
     steps:
       - name: Resultado
         run: |
-          echo '${{ toJSON(needs) }}' | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' >/dev/null \
-            && echo "ci en verde" || { echo "ci en rojo"; exit 1; }
+          if echo '${{ toJSON(needs) }}' | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' >/dev/null; then
+            echo "ci en verde"
+          else
+            echo "ci en rojo"; exit 1
+          fi
