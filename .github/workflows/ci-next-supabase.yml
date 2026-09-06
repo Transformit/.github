@@ -39,9 +39,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0 }
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+      # Imagen oficial en vez de gitleaks-action (que exige licencia para organizaciones).
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest \
+            git /repo --no-banner --redact --exit-code 1 --report-format sarif --report-path /repo/gitleaks.sarif
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks
+          path: gitleaks.sarif
+          retention-days: 7
 
   calidad:
     runs-on: ubuntu-latest
