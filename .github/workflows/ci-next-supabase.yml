@@ -1,0 +1,148 @@
+# CI reutilizable para productos Next.js + Supabase. Un solo job por etapa para que el ruleset
+# de main pueda exigir el check "ci". Objetivo: < 8 min con caché de pnpm y de navegadores.
+name: ci-next-supabase
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "22"
+      run-e2e:
+        type: boolean
+        default: true
+      coverage-threshold:
+        type: number
+        default: 70
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  titulo-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          types: feat fix docs style refactor perf test build ci chore revert
+          requireScope: false
+          subjectPattern: ^.{1,80}$
+
+  secretos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  calidad:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm format:check
+      - run: pnpm knip
+      - run: pnpm depcruise
+      - run: pnpm audit --audit-level=high
+      - run: pnpm test -- --coverage.enabled --coverage.thresholds.lines=${{ inputs.coverage-threshold }}
+
+  base-de-datos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: supabase/setup-cli@v1
+        with: { version: latest }
+      - name: Linter de migraciones nuevas (squawk)
+        if: github.event_name == 'pull_request'
+        run: |
+          nuevas=$(git diff --name-only --diff-filter=A origin/${{ github.base_ref }}...HEAD -- supabase/migrations/ | grep -E '\.sql$' || true)
+          if [ -n "$nuevas" ]; then pnpm squawk $nuevas; else echo "sin migraciones nuevas"; fi
+      - name: Migraciones editadas (prohibido)
+        if: github.event_name == 'pull_request'
+        run: |
+          editadas=$(git diff --name-only --diff-filter=MD origin/${{ github.base_ref }}...HEAD -- supabase/migrations/ || true)
+          if [ -n "$editadas" ]; then echo "Migraciones ya fusionadas modificadas o borradas:"; echo "$editadas"; exit 1; fi
+      - run: supabase start -x studio,imgproxy,inbucket,logflare,vector,edge-runtime,realtime
+      - run: supabase db reset --local
+      - run: supabase test db --local
+      - name: Tipos generados sin drift
+        run: |
+          pnpm db:types
+          git diff --exit-code -- lib/supabase/tipos.ts || { echo "Corre pnpm db:types y commitea los tipos"; exit 1; }
+      - if: always()
+        run: supabase stop --no-backup
+
+  build-y-e2e:
+    runs-on: ubuntu-latest
+    needs: [calidad]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: supabase/setup-cli@v1
+        if: inputs.run-e2e
+        with: { version: latest }
+      - if: inputs.run-e2e
+        run: supabase start -x studio,imgproxy,inbucket,logflare,vector,edge-runtime,realtime
+      - name: Variables para build y e2e
+        run: |
+          if [ "${{ inputs.run-e2e }}" = "true" ]; then
+            supabase status -o env --override-name api.url=NEXT_PUBLIC_SUPABASE_URL --override-name auth.publishable_key=NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY | grep -E 'NEXT_PUBLIC_SUPABASE_(URL|PUBLISHABLE_KEY)' >> "$GITHUB_ENV"
+          else
+            echo "NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321" >> "$GITHUB_ENV"
+            echo "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=build" >> "$GITHUB_ENV"
+          fi
+      - run: pnpm build
+      - if: inputs.run-e2e
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - if: inputs.run-e2e
+        run: pnpm exec playwright install --with-deps chromium
+      - if: inputs.run-e2e
+        run: pnpm e2e
+      - if: inputs.run-e2e && failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 7
+      - if: always() && inputs.run-e2e
+        run: supabase stop --no-backup
+
+  ci:
+    if: always()
+    runs-on: ubuntu-latest
+    needs: [titulo-pr, secretos, calidad, base-de-datos, build-y-e2e]
+    steps:
+      - name: Resultado
+        run: |
+          echo '${{ toJSON(needs) }}' | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' >/dev/null \
+            && echo "ci en verde" || { echo "ci en rojo"; exit 1; }
