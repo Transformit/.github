@@ -121,7 +121,11 @@ jobs:
       - name: Variables para build y e2e
         run: |
           if [ "${{ inputs.run-e2e }}" = "true" ]; then
-            supabase status -o env --override-name api.url=NEXT_PUBLIC_SUPABASE_URL --override-name auth.publishable_key=NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY | grep -E 'NEXT_PUBLIC_SUPABASE_(URL|PUBLISHABLE_KEY)' >> "$GITHUB_ENV"
+            # `status -o env` imprime KEY="valor"; se quitan las comillas para que sean URLs válidas.
+            supabase status -o env \
+              | grep -E '^(API_URL|PUBLISHABLE_KEY)=' \
+              | sed -E 's/^API_URL=/NEXT_PUBLIC_SUPABASE_URL=/; s/^PUBLISHABLE_KEY=/NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=/; s/="(.*)"$/=\1/' \
+              >> "$GITHUB_ENV"
           else
             echo "NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321" >> "$GITHUB_ENV"
             echo "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=build" >> "$GITHUB_ENV"
