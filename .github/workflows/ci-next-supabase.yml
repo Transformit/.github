@@ -30,7 +30,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
-          types: feat fix docs style refactor perf test build ci chore revert
+          # Uno por línea: la acción parte este input por saltos de línea, así que en una sola
+          # línea lo toma como un único tipo llamado "feat fix docs …" y ningún título valida.
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
           requireScope: false
           subjectPattern: ^.{1,80}$
 
