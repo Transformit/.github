@@ -130,14 +130,17 @@ jobs:
         if: inputs.run-e2e
         with: { version: latest }
       - if: inputs.run-e2e
-        run: supabase start -x studio,imgproxy,inbucket,logflare,vector,edge-runtime,realtime
+        # Mailpit (inbucket) se queda arriba: los E2E que invitan o envían enlaces necesitan SMTP local.
+        run: supabase start -x studio,imgproxy,logflare,vector,edge-runtime,realtime
       - name: Variables para build y e2e
         run: |
           if [ "${{ inputs.run-e2e }}" = "true" ]; then
             # `status -o env` imprime KEY="valor"; se quitan las comillas para que sean URLs válidas.
+            # La clave secreta local es la pública por defecto de `supabase start`; solo vale en CI y
+            # permite a la app usar auth.admin (invitaciones, worker) durante los E2E.
             supabase status -o env \
-              | grep -E '^(API_URL|PUBLISHABLE_KEY)=' \
-              | sed -E 's/^API_URL=/NEXT_PUBLIC_SUPABASE_URL=/; s/^PUBLISHABLE_KEY=/NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=/; s/="(.*)"$/=\1/' \
+              | grep -E '^(API_URL|PUBLISHABLE_KEY|SECRET_KEY)=' \
+              | sed -E 's/^API_URL=/NEXT_PUBLIC_SUPABASE_URL=/; s/^PUBLISHABLE_KEY=/NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=/; s/^SECRET_KEY=/SUPABASE_SECRET_KEY=/; s/="(.*)"$/=\1/' \
               >> "$GITHUB_ENV"
           else
             echo "NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321" >> "$GITHUB_ENV"
