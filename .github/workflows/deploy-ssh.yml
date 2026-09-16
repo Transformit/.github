@@ -86,7 +86,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: supabase/setup-cli@v1
-        with: { version: latest, github-token: ${{ github.token }} }
+        with:
+          version: latest
+          github-token: ${{ github.token }}
       - run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

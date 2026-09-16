@@ -106,7 +106,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - uses: supabase/setup-cli@v1
-        with: { version: latest, github-token: ${{ github.token }} }
+        with:
+          version: latest
+          github-token: ${{ github.token }}
       - name: Linter de migraciones nuevas (squawk)
         if: github.event_name == 'pull_request'
         run: |
@@ -140,7 +142,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: supabase/setup-cli@v1
         if: inputs.run-e2e
-        with: { version: latest, github-token: ${{ github.token }} }
+        with:
+          version: latest
+          github-token: ${{ github.token }}
       - if: inputs.run-e2e
         # Mailpit (inbucket) se queda arriba: los E2E que invitan o envían enlaces necesitan SMTP local.
         run: supabase start -x studio,imgproxy,logflare,vector,edge-runtime,realtime
