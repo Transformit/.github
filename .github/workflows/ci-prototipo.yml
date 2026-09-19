@@ -214,7 +214,9 @@ jobs:
         run: |
           nuevas=$(git diff --name-only --diff-filter=A "origin/${{ github.base_ref }}...HEAD" -- supabase/migrations/ | grep -E '\.sql$' || true)
           if [ -z "$nuevas" ]; then echo "sin migraciones nuevas"; exit 0; fi
-          config=""; [ -f supabase/squawk.toml ] && config="--config supabase/squawk.toml"
+          # Config: `supabase/squawk.toml` (monorepos) o `squawk.toml` en la raíz (plantilla del hq).
+          config=""
+          for c in supabase/squawk.toml squawk.toml; do [ -f "$c" ] && { config="--config $c"; break; }; done
           # shellcheck disable=SC2086 # $config vacío o dos palabras
           echo "$nuevas" | xargs npx --yes squawk-cli@latest $config
       - if: inputs.postgres-limpio && steps.db.outputs.changed == 'true'
