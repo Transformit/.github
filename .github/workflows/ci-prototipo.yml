@@ -1,0 +1,310 @@
+# CI "modo prototipo" (ADR de empresa 2026-09-19, en Transformit/hq): lo mínimo que protege un
+# repo en fase de prototipo dentro del presupuesto gratuito de Actions (2.000 min/mes para toda
+# la organización). Siempre corren el título del PR y gitleaks; cada validación adicional la
+# activa el repo con un input. Se llama solo en `pull_request` (el merge a main lleva commits ya
+# validados; los despliegues se disparan por `push` a main, no por este workflow). Cuando un
+# producto salga de prototipo, cambiar el `uses:` a `ci-next-supabase.yml`.
+name: ci-prototipo
+
+on:
+  workflow_call:
+    inputs:
+      # pnpm | yarn | npm | uv | ninguno. Con `uv` o `ninguno` los scripts de Node (lint,
+      # typecheck, formato, pruebas, build) se ignoran: usar `comandos`.
+      gestor:
+        type: string
+        default: pnpm
+      node-version:
+        type: string
+        default: "22"
+      # Paquetes del sistema que las pruebas necesitan (p. ej. "ffmpeg"), separados por espacios.
+      paquetes-apt:
+        type: string
+        default: ""
+      # Scripts de package.json: `<gestor> run <script>`. Los baratos van activos por defecto.
+      lint:
+        type: boolean
+        default: true
+      typecheck:
+        type: boolean
+        default: true
+      formato: # format:check
+        type: boolean
+        default: false
+      pruebas: # test
+        type: boolean
+        default: true
+      build: # build (apagado: Vercel/Dokploy construyen por su cuenta)
+        type: boolean
+        default: false
+      # Comandos propios del repo (bash, uno por línea) tras instalar dependencias. Es el camino
+      # para Python (`uv run pytest -q`), monorepos o pasos ad hoc.
+      comandos:
+        type: string
+        default: ""
+      # Base de datos (Supabase). Directorio que contiene `supabase/` (en monorepos puede ser
+      # un paquete). Las validaciones baratas (squawk, migraciones inmutables) van activas y no
+      # hacen nada si no hay `supabase/migrations`.
+      ruta-supabase:
+        type: string
+        default: "."
+      squawk:
+        type: boolean
+        default: true
+      migraciones-inmutables:
+        type: boolean
+        default: true
+      # Postgres limpio (`supabase start` + `db reset`, ≈3 min): solo si el PR toca `supabase/`.
+      postgres-limpio:
+        type: boolean
+        default: false
+      pruebas-db: # supabase test db (pgTAP); requiere postgres-limpio
+        type: boolean
+        default: false
+      # Comandos tras `db reset` (p. ej. `pnpm db:types && git diff --exit-code -- lib/supabase/tipos.ts`).
+      comandos-db:
+        type: string
+        default: ""
+      # Build + Playwright contra un Supabase local (la etapa más cara; solo pnpm).
+      e2e:
+        type: boolean
+        default: false
+      titulo-max:
+        type: number
+        default: 80
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  GESTOR_NODE: ${{ contains(fromJSON('["pnpm","yarn","npm"]'), inputs.gestor) }}
+
+jobs:
+  titulo-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          # Uno por línea: la acción parte este input por saltos de línea.
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+          subjectPattern: ^.{1,${{ inputs.titulo-max }}}$
+
+  secretos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+      # Imagen oficial en vez de gitleaks-action (que exige licencia para organizaciones). Usa
+      # `.gitleaks.toml` del repo si existe (listas de permitidos).
+      - name: gitleaks
+        run: |
+          config=""; [ -f .gitleaks.toml ] && config="--config /repo/.gitleaks.toml"
+          # shellcheck disable=SC2086 # $config vacío o dos palabras
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest \
+            git /repo --no-banner --redact --exit-code 1 $config \
+            --report-format sarif --report-path /repo/gitleaks.sarif
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks
+          path: gitleaks.sarif
+          retention-days: 7
+
+  calidad:
+    if: inputs.lint || inputs.typecheck || inputs.formato || inputs.pruebas || inputs.build || inputs.comandos != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - if: inputs.gestor == 'pnpm'
+        uses: pnpm/action-setup@v4
+      - if: env.GESTOR_NODE == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.gestor }}
+      - if: inputs.gestor == 'uv'
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - if: inputs.paquetes-apt != ''
+        # Por variable de entorno, no interpolado en el script (patrón anti-inyección de Actions).
+        env:
+          PAQUETES: ${{ inputs.paquetes-apt }}
+        run: |
+          # shellcheck disable=SC2086 # se quiere partir por espacios
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends $PAQUETES
+      - name: Instalar dependencias
+        run: |
+          case "${{ inputs.gestor }}" in
+            pnpm) pnpm install --frozen-lockfile ;;
+            yarn) yarn install --frozen-lockfile ;;
+            npm) npm ci ;;
+            uv) uv sync --frozen ;;
+            ninguno) echo "sin dependencias que instalar" ;;
+            *) echo "gestor desconocido: ${{ inputs.gestor }}"; exit 1 ;;
+          esac
+      - if: inputs.lint && env.GESTOR_NODE == 'true'
+        run: ${{ inputs.gestor }} run lint
+      - if: inputs.typecheck && env.GESTOR_NODE == 'true'
+        run: ${{ inputs.gestor }} run typecheck
+      - if: inputs.formato && env.GESTOR_NODE == 'true'
+        run: ${{ inputs.gestor }} run format:check
+      - if: inputs.pruebas && env.GESTOR_NODE == 'true'
+        env: { CI: "true" }
+        run: ${{ inputs.gestor }} run test
+      - if: inputs.build && env.GESTOR_NODE == 'true'
+        run: ${{ inputs.gestor }} run build
+      - if: inputs.comandos != ''
+        name: Comandos del repo
+        env:
+          COMANDOS: ${{ inputs.comandos }}
+        run: |
+          printf '%s\n' "$COMANDOS" > "$RUNNER_TEMP/comandos.sh"
+          bash -euxo pipefail "$RUNNER_TEMP/comandos.sh"
+
+  base-de-datos:
+    if: inputs.squawk || inputs.migraciones-inmutables || inputs.postgres-limpio
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ${{ inputs.ruta-supabase }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+      - name: ¿Hay migraciones y qué cambió?
+        id: db
+        run: |
+          if [ ! -d supabase/migrations ]; then
+            echo "sin supabase/migrations en ${{ inputs.ruta-supabase }}: nada que validar"
+            { echo "hay=false"; echo "changed=false"; } >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "hay=true" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" != "pull_request" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          cambios=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- supabase/ || true)
+          if [ -n "$cambios" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; echo "sin cambios en supabase/: se omite el Postgres limpio"; fi
+      - name: Migraciones editadas (prohibido)
+        if: inputs.migraciones-inmutables && steps.db.outputs.hay == 'true' && github.event_name == 'pull_request'
+        run: |
+          editadas=$(git diff --name-only --diff-filter=MD "origin/${{ github.base_ref }}...HEAD" -- supabase/migrations/ || true)
+          if [ -n "$editadas" ]; then echo "Migraciones ya fusionadas modificadas o borradas:"; echo "$editadas"; exit 1; fi
+      - name: Linter de migraciones nuevas (squawk)
+        if: inputs.squawk && steps.db.outputs.hay == 'true' && github.event_name == 'pull_request'
+        run: |
+          nuevas=$(git diff --name-only --diff-filter=A "origin/${{ github.base_ref }}...HEAD" -- supabase/migrations/ | grep -E '\.sql$' || true)
+          if [ -z "$nuevas" ]; then echo "sin migraciones nuevas"; exit 0; fi
+          config=""; [ -f supabase/squawk.toml ] && config="--config supabase/squawk.toml"
+          # shellcheck disable=SC2086 # $config vacío o dos palabras
+          echo "$nuevas" | xargs npx --yes squawk-cli@latest $config
+      - if: inputs.postgres-limpio && steps.db.outputs.changed == 'true'
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+          github-token: ${{ github.token }}
+      - name: Aplicar migraciones y seeds en un Postgres limpio
+        if: inputs.postgres-limpio && steps.db.outputs.changed == 'true'
+        run: |
+          supabase start -x studio,imgproxy,inbucket,logflare,vector,edge-runtime,realtime
+          supabase db reset --local
+      - if: inputs.postgres-limpio && inputs.pruebas-db && steps.db.outputs.changed == 'true'
+        run: supabase test db --local
+      - if: inputs.postgres-limpio && inputs.comandos-db != '' && steps.db.outputs.changed == 'true' && inputs.gestor == 'pnpm'
+        uses: pnpm/action-setup@v4
+      - if: inputs.postgres-limpio && inputs.comandos-db != '' && steps.db.outputs.changed == 'true' && env.GESTOR_NODE == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.gestor }}
+      - name: Comandos tras db reset
+        if: inputs.postgres-limpio && inputs.comandos-db != '' && steps.db.outputs.changed == 'true'
+        env:
+          COMANDOS: ${{ inputs.comandos-db }}
+        run: |
+          case "${{ inputs.gestor }}" in
+            pnpm) pnpm install --frozen-lockfile ;;
+            yarn) yarn install --frozen-lockfile ;;
+            npm) npm ci ;;
+            *) : ;;
+          esac
+          printf '%s\n' "$COMANDOS" > "$RUNNER_TEMP/comandos-db.sh"
+          bash -euxo pipefail "$RUNNER_TEMP/comandos-db.sh"
+      - if: always() && inputs.postgres-limpio && steps.db.outputs.changed == 'true'
+        run: supabase stop --no-backup
+
+  build-y-e2e:
+    if: inputs.e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [calidad]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+          github-token: ${{ github.token }}
+      # Mailpit (inbucket) se queda arriba: los E2E que invitan o envían enlaces necesitan SMTP local.
+      - run: supabase start -x studio,imgproxy,logflare,vector,edge-runtime,realtime
+      - name: Variables para build y e2e
+        run: |
+          # `status -o env` imprime KEY="valor"; se quitan las comillas para que sean URLs válidas.
+          supabase status -o env \
+            | grep -E '^(API_URL|PUBLISHABLE_KEY|SECRET_KEY)=' \
+            | sed -E 's/^API_URL=/NEXT_PUBLIC_SUPABASE_URL=/; s/^PUBLISHABLE_KEY=/NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=/; s/^SECRET_KEY=/SUPABASE_SECRET_KEY=/; s/="(.*)"$/=\1/' \
+            >> "$GITHUB_ENV"
+      - run: pnpm build
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm e2e
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 7
+      - if: always()
+        run: supabase stop --no-backup
+
+  # Único check que hay que exigir en main: verde si todo lo que corrió pasó (lo omitido no cuenta).
+  ci:
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    needs: [titulo-pr, secretos, calidad, base-de-datos, build-y-e2e]
+    steps:
+      - name: Resultado
+        run: |
+          if echo '${{ toJSON(needs) }}' | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' >/dev/null; then
+            echo "ci en verde"
+          else
+            echo "ci en rojo"; exit 1
+          fi
