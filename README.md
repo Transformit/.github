@@ -33,7 +33,14 @@ Inputs de `ci-prototipo`: `gestor` (pnpm | yarn | npm | uv | ninguno), `node-ver
 `lint`/`typecheck`/`pruebas` (activos), `formato`/`build` (apagados), `comandos` (bash del repo, uno
 por línea; el camino para Python y monorepos), `ruta-supabase`, `squawk` y `migraciones-inmutables`
 (activos, no hacen nada sin `supabase/migrations`), `postgres-limpio` (solo si el PR toca
-`supabase/`), `pruebas-db`, `comandos-db`, `e2e`, `titulo-max`.
+`supabase/`), `pruebas-db`, `comandos-db`, `e2e`, `titulo-max`, `minutos-calidad` (tope del job
+`calidad`, default 10: un proceso colgado —una cola esperando a Redis, un servidor que no cierra—
+gasta minutos de Actions hasta ese tope; ponerlo cerca del tiempo normal del repo).
+
+Alertas: cuando `ci` queda en rojo por tope de tiempo, el job final lo anota como error del run
+("probablemente superó el tope…"). Para recibirlo por correo o push: GitHub → Settings →
+Notifications → Actions → "Send notifications for failed workflows only" (y la app de GitHub
+Mobile para push); llega al autor del PR y a quien lanzó el run.
 
 Producto fuera de prototipo:
 
